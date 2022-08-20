@@ -2,6 +2,7 @@
 
 import asyncio
 import enum
+import itertools
 import typing
 import logging
 
@@ -113,6 +114,12 @@ class SymNetConnection:
     def _update_callback(self, rcn: int, val: int) -> None:
         self.publish(rcn, val)
     
+    async def disconnect(self) -> None:
+        if self._protocol is None:
+            return
+        
+        await self._protocol.disconnect()
+    
     async def _do_task(self, msg: str, task: SymNetTask[T]) -> T:
         ctr: int = 0
         last_err: Exception | None = None
@@ -181,15 +188,15 @@ class SymNetConnection:
         
         return self._version
     
-    def subscribe(self, param: int, callback: typing.Callable[[int, int], None]) -> None:
+    async def subscribe(self, param: int, callback: typing.Callable[[int, int], None]) -> None:
         if not param in self._subscriptions:
             self._subscriptions[param] = { callback }
 
-            self._update_subscriptions()
+            await self._update_subscriptions()
         else:
             self._subscriptions[param].add(callback)
     
-    def unsubscribe(self, param: int, callback: typing.Callable[[int, int], None]) -> None:
+    async def unsubscribe(self, param: int, callback: typing.Callable[[int, int], None]) -> None:
         if param in self._subscriptions:
             subs = self._subscriptions[param]
 
@@ -198,10 +205,35 @@ class SymNetConnection:
             if len(subs) == 0:
                 del self._subscriptions[param]
 
-                self._update_subscriptions()
+                await self._update_subscriptions(param)
     
-    def _update_subscriptions(self):
-        pass
+    async def _update_subscriptions(self, deleted_param: int | None = None) -> None:
+        if deleted_param is not None:
+            self._do_task(f"PUD {deleted_param}", SymNetBasicTask(retry_limit = 3))
+        
+        # convert to ranges - https://stackoverflow.com/a/4629241
+        params = sorted(set([param for param in self._subscriptions]))
+        ranges = []
+
+        for key, group in itertools.groupby(enumerate(params), lambda t: t[1] - t[0]):
+            group = list(group)
+
+            ranges.append((group[0][1], group[-1][1]))
+        
+        # subscribe
+        subscribe_tasks = []
+
+        for start, end in ranges:
+            range_str = None
+
+            if start == end:
+                range_str = f"{start}"
+            else:
+                range_str = f"{start} {end}"
+            
+            subscribe_tasks.append(self._do_task(f"PUE {range_str}", SymNetBasicTask(retry_limit = 3)))
+        
+        await asyncio.gather(*subscribe_tasks)
     
     def publish(self, param: int, value: int) -> None:
         if param in self._subscriptions:

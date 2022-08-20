@@ -106,8 +106,10 @@ class SymNetProtocol(asyncio.Protocol):
         if self._on_conn_lost is not None:
             self._on_conn_lost.set_result(err)
     
-    def disconnect(self) -> None:
+    async def disconnect(self) -> None:
         self._transport.abort()
+
+        await self._on_conn_lost
     
     @property
     def is_datagram(self):
