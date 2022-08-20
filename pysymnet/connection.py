@@ -229,11 +229,11 @@ class SymNetConnection:
             LOGGER.debug("Using cached version information.")
 
         return self._version
-    
+
     async def reboot(self) -> None:
         """Reboot the DSP."""
         await self._do_task("R!", SymNetBasicTask())
-    
+
     async def ping(self) -> None:
         """Ping the DSP."""
         await self._do_task("NOP", SymNetBasicTask())
