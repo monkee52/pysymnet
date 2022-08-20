@@ -75,13 +75,13 @@ class SymNetConnection:
 
         match self._mode:
             case SymNetConnectionType.TCP:
-                transport, protocol = await loop.create_connection(
+                _, protocol = await loop.create_connection(
                     lambda: SymNetProtocol(False, on_conn_made, on_conn_lost),
                     self._host,
                     self._port,
                 )
             case SymNetConnectionType.UDP:
-                transport, protocol = await loop.create_datagram_endpoint(
+                _, protocol = await loop.create_datagram_endpoint(
                     lambda: SymNetProtocol(True, on_conn_made, on_conn_lost),
                     remote_addr=(self._host, self._port),
                 )
@@ -229,6 +229,14 @@ class SymNetConnection:
             LOGGER.debug("Using cached version information.")
 
         return self._version
+    
+    async def reboot(self) -> None:
+        """Reboot the DSP."""
+        await self._do_task("R!", SymNetBasicTask())
+    
+    async def ping(self) -> None:
+        """Ping the DSP."""
+        await self._do_task("NOP", SymNetBasicTask())
 
     async def subscribe(
         self, param: int, callback: typing.Callable[[int, int], None]
