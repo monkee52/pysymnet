@@ -145,12 +145,20 @@ class SymNetConnection:
 
         self._next_connect_tasks = []
 
+        self._protocol = protocol
+
+        return protocol
+
     def _conn_lost(self, fut: asyncio.Future[Exception | None]) -> None:
         self._next_connect_tasks = self._protocol.get_queue()
         self._protocol = None
 
     def _update_callback(self, rcn: int, val: int) -> None:
         self.publish(rcn, val)
+
+    async def connect(self) -> None:
+        """Connect to the DSP."""
+        await self._get_connection()
 
     async def disconnect(self) -> None:
         """Disconnect from the DSP."""
@@ -166,14 +174,14 @@ class SymNetConnection:
         while ctr < task.retry_limit:
             LOGGER.debug(f"'{msg}' attempt {ctr + 1} of {task.retry_limit}")
 
-            conn = await self._get_connection()
-
-            if ctr == 0:
-                conn.queue_task((msg, task))
-            else:
-                conn.queue_task_immediate((msg, task))
-
             try:
+                conn = await self._get_connection()
+
+                if ctr == 0:
+                    conn.queue_task(msg, task)
+                else:
+                    conn.queue_task_immediate(msg, task)
+
                 return await task
             except Exception as err:
                 last_err = err
@@ -248,10 +256,9 @@ class SymNetConnection:
 
     async def get_ip(self) -> tuple[str, str]:
         """Get the connect IP and the self-reported DSP IP."""
-        return (
-            self._host,
-            await self._do_task("RI", SymNetStringTask(retry_limit=3)),
-        )
+        ip = await self._do_task("RI", SymNetStringTask(retry_limit=3))
+
+        return (self._host, ip)
 
     async def get_version(self) -> str:
         """Get the version information from the DSP."""
