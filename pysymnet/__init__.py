@@ -2,161 +2,140 @@
 
 import asyncio
 import enum
-import collections
-from concurrent.futures.thread import ThreadPoolExecutor
 import typing
+import logging
 
 from .tasks import *
-from .exceptions import SymNetException
+from .protocol import SymNetProtocol
 
 DEFAULT_PORT: int = 48631
+LOGGER: logging.Logger = logging.getLogger(__name__)
 
 class SymNetConnectionType(enum.Enum):
     TCP = "tcp"
     UDP = "udp"
 
-def fader_converter(min: float, max: float) -> typing.Tuple[typing.Callable[[int], float], typing.Callable[[float], int]]:
-    delta: float = max - min
+class DecibelConverter:
+    _min: float
+    _max: float
+    _delta: float
 
-    def to_db(val: int) -> float:
+    def __init__(self, min: float, max: float):
+        self._min = min
+        self._max = max
+
+        self._delta = max - min
+    
+    @property
+    def min(self) -> float:
+        return self._min
+    
+    @property
+    def max(self) -> float:
+        return self._max
+    
+    def to_db(self, val: int) -> float:
         if val == 0:
             return 0.0
         
-        return min + delta * float(val) / 65535.0
+        return self.min + self._delta * float(val) / 65535.0
     
-    def from_db(val: float) -> int:
+    def from_db(self, val: float) -> int:
         if val == 0.0:
             return 0
         
-        return (val - min) * 65535.0 / delta
-    
-    return to_db, from_db
+        rcn_val = int((val - self.min) * 65535.0 / self._delta)
+
+        return max(0, min(65535, rcn_val))
 
 class SymNetConnection:
     _host: str
     _port: int
     _mode: SymNetConnectionType
 
-    _current_task: SymNetTask
-    _queue: collections.deque[typing.Tuple[str, SymNetTask]]
-
-    _connect_future: asyncio.Future
-
-    _reader: asyncio.StreamReader
-    _writer: asyncio.StreamWriter
-
     _version: typing.List[str]
 
     _subscriptions: dict[int, set[typing.Callable[[int, int], None]]]
+
+    _protocol: SymNetProtocol | None
+    _next_connect_tasks: typing.List[typing.Tuple[str, SymNetTask]]
 
     def __init__(self, host: str, port: int = DEFAULT_PORT, mode: SymNetConnectionType = SymNetConnectionType.TCP):
         self._host = host
         self._port = port
         self._mode = mode
 
-        self._current_task = None
-        self._queue = collections.deque()
-        self._subscriptions = set()
-
-        self._reader = None
-        self._writer = None
-
-        loop = asyncio.get_running_loop()
-
-        self._connect_future = loop.create_future()
+        self._subscriptions = {}
 
         self._version = None
+        self._protocol = None
+        self._next_connect_tasks = []
     
-    async def _get_connection(self) -> None:
-        if self._reader is not None:
-            return
+    async def _get_connection(self) -> SymNetProtocol:
+        if self._protocol is not None:
+            return self._protocol
         
-        if self._mode == SymNetConnectionType.TCP:
-            reader, writer = await asyncio.open_connection(self._host, self._port)
+        loop = asyncio.get_running_loop()
 
-            self._reader = reader
-            self._writer = writer
-        elif self._mode == SymNetConnectionType.UDP:
-            raise NotImplementedError()
-        else:
-            raise NotImplementedError()
-    
-    async def _symnet_loop(self) -> None:
-        try:
-            await self._get_connection()
-        except Exception as err:
-            self._connect_future.set_exception(err)
+        on_conn_made = loop.create_future()
+        on_conn_lost = loop.create_future()
 
-        self._connect_future.set_result(None)
+        on_conn_lost.add_done_callback(self._conn_lost)
 
-        while True:
-            line = await self._reader.readuntil(b"\r")
-            task = self._current_task
+        LOGGER.debug(f"Connection type is '{self._mode}'")
 
-            # check if it's an update
-            if (task is None or not task.expects_update_format) and line[0] == "#":
-                pos = line.index("=")
-
-                rcn = int(line[1:pos])
-                val = int(line[pos + 1:])
-
-                if val == -1:
-                    # Should never happen
-                    pass
-            elif task is not None:
-                if line == "NAK":
-                    task.error(SymNetException("NAK received from DSP."))
-                else:
-                    await task.handle_line(line)
-    
-    def _try_exec_tasks(self) -> None:
-        if self._current_task is not None:
-            return
+        match self._mode:
+            case SymNetConnectionType.TCP:
+                transport, protocol = await loop.create_connection(lambda: SymNetProtocol(False, on_conn_made, on_conn_lost), self._host, self._port)
+            case SymNetConnectionType.UDP:
+                transport, protocol = await loop.create_datagram_endpoint(lambda: SymNetProtocol(True, on_conn_made, on_conn_lost), remote_addr=(self._host, self._port))
+            case _:
+                raise NotImplementedError(f"'{self._mode}' is not a valid connection type.")
         
-        try:
-            msg: str
-            task: SymNetTask[T]
-            
-            msg, task = self._queue.popleft(False)
+        protocol.update_callback = self._update_callback
 
-            self._current_task = task
+        LOGGER.debug("Connecting...")
 
-            task._future.add_done_callback(self._task_done)
+        await on_conn_made
 
-            self._get_connection()
+        LOGGER.debug("Connected.")
+        LOGGER.debug(f"Re-queuing {len(self._next_connect_tasks)} tasks.")
 
-            self._writer.write(msg.encode() + b"\r")
-        except IndexError:
-            return
+        for msg, task in self._next_connect_tasks:
+            protocol.queue_task(msg, task)
+        
+        self._next_connect_tasks = []
     
-    def _task_done(self, _fut: asyncio.Future):
-        self._queue.task_done()
-
-        self._current_task = None
-
-        self._try_exec_tasks()
-
+    def _conn_lost(self, fut: asyncio.Future[Exception | None]) -> None:
+        self._next_connect_tasks = self._protocol.get_queue()
+        self._protocol = None
+    
+    def _update_callback(self, rcn: int, val: int) -> None:
+        self.publish(rcn, val)
+    
     async def _do_task(self, msg: str, task: SymNetTask[T]) -> T:
         ctr: int = 0
-        last_err: Exception = None
+        last_err: Exception | None = None
 
         while ctr < task.retry_limit:
-            if ctr == 0:
-                self._queue.append((msg, task))
-            else:
-                self._queue.appendleft((msg, task))
-            
-            ctr += 1
+            LOGGER.debug(f"'{msg}' attempt {ctr + 1} of {task.retry_limit}")
 
-            self._try_exec_tasks()
+            conn = await self._get_connection()
+
+            if ctr == 0:
+                conn.queue_task((msg, task))
+            else:
+                conn.queue_task_immediate((msg, task))
 
             try:
                 return await task
             except Exception as err:
                 last_err = err
-        
+
+            ctr += 1
+
         if last_err is not None:
-            task.error(last_err)
+            raise last_err
 
     async def get_param(self, param: int) -> int:
         return await self._do_task(f"GS {param}", SymNetValueTask(retry_limit = 3))
@@ -197,6 +176,8 @@ class SymNetConnection:
     async def get_version(self) -> str:
         if self._version is None:
             self._version = await self._do_task(f"$v V", SymNetMultiStringTask(retry_limit = 3))
+        else:
+            LOGGER.debug("Using cached version information.")
         
         return self._version
     
@@ -229,12 +210,3 @@ class SymNetConnection:
                     callback(param, value)
                 except:
                     pass
-    
-    async def connect(self) -> None:
-        #loop = asyncio.get_running_loop()
-
-        #executor = ThreadPoolExecutor(max_workers=4)
-
-        asyncio.ensure_future(self._symnet_loop())
-
-        await self._connect_future
