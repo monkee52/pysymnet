@@ -8,7 +8,7 @@ from .exceptions import SymNetException
 from .tasks import SymNetTask
 
 
-class SymNetProtocol(asyncio.Protocol):
+class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
     """SymNet TCP/UDP protocol."""
 
     _on_conn_made: asyncio.Future[bool] | None
