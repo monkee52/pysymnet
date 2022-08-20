@@ -3,10 +3,11 @@
 import asyncio
 import enum
 import collections
-from tracemalloc import start
+from concurrent.futures.thread import ThreadPoolExecutor
 import typing
 
 from .tasks import *
+from .exceptions import SymNetException
 
 DEFAULT_PORT: int = 48631
 
@@ -31,9 +32,6 @@ def fader_converter(min: float, max: float) -> typing.Tuple[typing.Callable[[int
     
     return to_db, from_db
 
-class SymNetException(Exception):
-    pass
-
 class SymNetConnection:
     _host: str
     _port: int
@@ -41,6 +39,8 @@ class SymNetConnection:
 
     _current_task: SymNetTask
     _queue: collections.deque[typing.Tuple[str, SymNetTask]]
+
+    _connect_future: asyncio.Future
 
     _reader: asyncio.StreamReader
     _writer: asyncio.StreamWriter
@@ -58,6 +58,13 @@ class SymNetConnection:
         self._queue = collections.deque()
         self._subscriptions = set()
 
+        self._reader = None
+        self._writer = None
+
+        loop = asyncio.get_running_loop()
+
+        self._connect_future = loop.create_future()
+
         self._version = None
     
     async def _get_connection(self) -> None:
@@ -65,14 +72,22 @@ class SymNetConnection:
             return
         
         if self._mode == SymNetConnectionType.TCP:
-            self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
+            reader, writer = await asyncio.open_connection(self._host, self._port)
+
+            self._reader = reader
+            self._writer = writer
         elif self._mode == SymNetConnectionType.UDP:
             raise NotImplementedError()
         else:
             raise NotImplementedError()
     
     async def _symnet_loop(self) -> None:
-        await self._get_connection()
+        try:
+            await self._get_connection()
+        except Exception as err:
+            self._connect_future.set_exception(err)
+
+        self._connect_future.set_result(None)
 
         while True:
             line = await self._reader.readuntil(b"\r")
@@ -130,12 +145,18 @@ class SymNetConnection:
                 self._queue.append((msg, task))
             else:
                 self._queue.appendleft((msg, task))
+            
+            ctr += 1
 
             self._try_exec_tasks()
 
-            return await task
+            try:
+                return await task
+            except Exception as err:
+                last_err = err
         
-        task.error(last_err)
+        if last_err is not None:
+            task.error(last_err)
 
     async def get_param(self, param: int) -> int:
         return await self._do_task(f"GS {param}", SymNetValueTask(retry_limit = 3))
@@ -210,6 +231,10 @@ class SymNetConnection:
                     pass
     
     async def connect(self) -> None:
-        loop = asyncio.get_running_loop()
+        #loop = asyncio.get_running_loop()
 
-        loop.create_task(self._symnet_loop)
+        #executor = ThreadPoolExecutor(max_workers=4)
+
+        asyncio.ensure_future(self._symnet_loop())
+
+        await self._connect_future

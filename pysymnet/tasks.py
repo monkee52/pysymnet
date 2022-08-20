@@ -2,7 +2,7 @@ import abc
 import asyncio
 import typing
 
-from . import SymNetException
+from .exceptions import SymNetException
 
 T = typing.TypeVar("T")
 

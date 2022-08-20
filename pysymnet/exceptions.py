@@ -1,0 +1,2 @@
+class SymNetException(Exception):
+    pass
