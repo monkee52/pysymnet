@@ -67,7 +67,7 @@ class DecibelConverter(SymNetConverter[float]):
         return max(0, min(65535, rcn_val))
 
 
-class PercentConverter(DecibelConverter[float]):
+class PercentConverter(DecibelConverter):
     """DSP percentage converter."""
 
     def from_rcn(self, val: int) -> float:
@@ -103,7 +103,7 @@ class ButtonConverter(SymNetConverter[bool]):
 
     def to_rcn(self, val: bool) -> int:
         """Convert a boolean value to the DSP equivalent."""
-        return (65535 if val else 0) ^ self.inverted
+        return 65535 if (val ^ self.inverted) else 0
 
 
 class SelectorConverter(SymNetConverter[int]):

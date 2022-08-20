@@ -109,7 +109,9 @@ class SymNetConnection:
         return protocol
 
     def _conn_lost(self, fut: asyncio.Future[Exception | None]) -> None:
-        self._next_connect_tasks = self._protocol.get_queue()
+        if self._protocol is not None:
+            self._next_connect_tasks = self._protocol.get_queue()
+
         self._protocol = None
 
     def _update_callback(self, rcn: int, val: int) -> None:
@@ -266,9 +268,13 @@ class SymNetConnection:
     async def _update_subscriptions(
         self, deleted_param: int | None = None
     ) -> None:
+        subscribe_tasks = []
+
         if deleted_param is not None:
-            self._do_task(
-                f"PUD {deleted_param}", SymNetBasicTask(retry_limit=3)
+            subscribe_tasks.append(
+                self._do_task(
+                    f"PUD {deleted_param}", SymNetBasicTask(retry_limit=3)
+                )
             )
 
         # convert to ranges - https://stackoverflow.com/a/4629241
@@ -283,8 +289,6 @@ class SymNetConnection:
             ranges.append((group[0][1], group[-1][1]))
 
         # subscribe
-        subscribe_tasks = []
-
         for start, end in ranges:
             range_str = None
 

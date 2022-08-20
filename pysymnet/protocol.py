@@ -73,11 +73,13 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
             if self.update_callback is not None:
                 self.update_callback(rcn, val)
-        else:
+        elif task is not None:
             if line.upper() == "NAK":
                 task.error(SymNetException("NAK received from DSP."))
             else:
                 task.handle_line(line)
+        else:
+            LOGGER.debug("Unexpected response '{line}'.")
 
     def _try_process_tasks(self) -> None:
         if self._current_task is not None:
@@ -94,7 +96,7 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
             task._future.add_done_callback(self._task_done)
 
-            LOGGER.debug(f"Sending '{msg}'")
+            LOGGER.debug(f"Sending '{msg}'.")
 
             self._write(msg + "\r")
         except IndexError:
@@ -114,7 +116,7 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
     def queue_task(self, msg: str, task: SymNetTask) -> None:
         """Add a task to the end of the queue."""
-        LOGGER.debug(f"Queued {msg}.")
+        LOGGER.debug(f"Queued '{msg}'.")
 
         self._queue.append((msg, task))
 
@@ -122,7 +124,7 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
     def queue_task_immediate(self, msg: str, task: SymNetTask) -> None:
         """Add a task to the front of the queue."""
-        LOGGER.debug(f"Queued immediate {msg}")
+        LOGGER.debug(f"Queued immediate '{msg}'.")
 
         self._queue.appendleft((msg, task))
 
@@ -145,6 +147,8 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
     def data_received(self, data: bytes) -> None:
         """Notify that TCP data has been received."""
+        [print(line) for line in data.decode().split("\r")]
+
         for line in data.split(b"\r")[:-1]:
             self._process_line(line.decode())
 

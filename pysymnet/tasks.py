@@ -44,7 +44,7 @@ class SymNetTask(typing.Generic[T], metaclass=abc.ABCMeta):
         return self._retry_limit
 
 
-class SymNetBasicTask(SymNetTask[None]):
+class SymNetBasicTask(SymNetTask[bool]):
     """SymNet task that returns ACK/NAK."""
 
     def __init__(self, retry_limit: int = 1):
@@ -53,8 +53,8 @@ class SymNetBasicTask(SymNetTask[None]):
 
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
-        if line == "ACK":
-            self._future.set_result(None)
+        if line.upper() == "ACK":
+            self._future.set_result(True)
         else:
             self.error(SymNetException(f"Unexpected value: '{line}'"))
 

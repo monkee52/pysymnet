@@ -40,7 +40,7 @@ def create_dummy_dsp():
 
                         continue
 
-                    lines = lines.split(b"\r")
+                    lines = lines.split(b"\r")[:-1]
 
                     for line in lines:
                         line = line.decode()
@@ -92,7 +92,9 @@ def create_dummy_dsp():
 
                                 print(f"ip = {ip}")
 
-                                client.send(f"{ip}\r".encode())
+                                sock.send(f"{ip}\r".encode())
+                            case _:
+                                sock.send(f"ACK\r".encode())
     except KeyboardInterrupt:
         server.close()
 

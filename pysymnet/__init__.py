@@ -1,6 +1,7 @@
 """Python Symetrix SymNet module."""
 
 import asyncio
+from inspect import Attribute
 import typing
 
 from .connection import SymNetConnection, SymNetConnectionType
@@ -26,7 +27,7 @@ class DSPControl(typing.Generic[T]):
     _converter: SymNetConverter[T]
     _name: str
     _rcn: int
-    _curr_value: T
+    _curr_value: T | None
 
     _subscribers: set[typing.Callable[[TDSPControl, T, T], None]]
 
@@ -45,8 +46,14 @@ class DSPControl(typing.Generic[T]):
 
         self._subscribers = set()
 
-        asyncio.ensure_future(
-            self._connection.subscribe(rcn, self._rcn_updated)
+        self._curr_value = None
+
+        asyncio.ensure_future(self._async_init())
+
+    async def _async_init(self):
+        await asyncio.gather(
+            self._connection.subscribe(self._rcn, self._rcn_updated),
+            self.refresh(),
         )
 
     def _from_rcn(self, val: int) -> None:
@@ -62,6 +69,9 @@ class DSPControl(typing.Generic[T]):
             return self._curr_value
 
     def _rcn_updated(self, rcn: int, val: int) -> None:
+        if rcn != self._rcn:
+            return
+
         old_value = self._curr_value
 
         self._from_rcn(val)
@@ -93,6 +103,12 @@ class DSPControl(typing.Generic[T]):
             self._connection.unsubscribe(self._rcn, self._rcn_updated)
         )
 
+    async def refresh(self) -> None:
+        """Force update the cached value."""
+        val = await self._connection.get_param(self._rcn)
+
+        self._rcn_updated(self._rcn, val)
+
     @property
     def value(self) -> T:
         """Get the current value."""
@@ -106,7 +122,9 @@ class DSPControl(typing.Generic[T]):
         self._curr_value = val
 
         try:
-            self._connection.set_param(self._to_rcn())
+            asyncio.ensure_future(
+                self._connection.set_param(self._rcn, self._to_rcn())
+            )
         except Exception as err:
             # Restore value as the DSP didn't acknowledge the change.
             self._curr_value = old_value
@@ -133,7 +151,7 @@ class DSP:
 
     _connection: SymNetConnection
 
-    _controls: dict[str, DSPControl]
+    _controls: dict[str, DSPControl] = {}
 
     def __init__(
         self,
@@ -145,6 +163,8 @@ class DSP:
         self._host = host
         self._port = port
         self._mode = mode
+
+        self._controls = {}
 
         self._connection = SymNetConnection(host, port, mode)
 
@@ -159,20 +179,7 @@ class DSP:
 
         self._controls[name] = control
 
-        def get_ctrl(self) -> T:
-            return control.value
-
-        def set_ctrl(self, val: T) -> None:
-            control.value = val
-
-        def del_ctrl(self) -> None:
-            control.destroy()
-
-            del self._controls[name]
-
-            delattr(self, name)
-
-        setattr(self, name, property(get_ctrl, set_ctrl, del_ctrl))
+        return control
 
     def remove_control(self, nameOrControl: str | DSPControl) -> None:
         """Remove a control property for the DSP."""
@@ -180,6 +187,39 @@ class DSP:
             nameOrControl = nameOrControl.name
 
         delattr(self, nameOrControl)
+
+    def get_control(self, nameOrControl: str | DSPControl[T]) -> DSPControl[T]:
+        """Get a DSP control."""
+        if not isinstance(nameOrControl, DSPControl):
+            nameOrControl = self._controls[nameOrControl]
+
+        return nameOrControl
+
+    def __getattr__(self, name: str) -> typing.Any:
+        """Get DSP control value, or pass up the chain."""
+        if name in self._controls:
+            return self._controls[name].value
+
+        if name in self.__dict__:
+            return self.__dict__[name]
+
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: T) -> None:
+        """Set a DSP control value, or pass up the chain."""
+        if name in self._controls:
+            self._controls[name].value = value
+        else:
+            self.__dict__[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        """Delete a DSP control, or pass up the chain."""
+        if name in self._controls:
+            self._controls[name].destroy()
+
+            del self._controls[name]
+        else:
+            del self.__dict__[name]
 
     async def connect(self) -> None:
         """Connect to the DSP."""
