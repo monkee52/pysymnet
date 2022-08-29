@@ -1,7 +1,7 @@
 """Python Symetrix SymNet module."""
 
 import asyncio
-from inspect import Attribute
+import logging
 import typing
 
 from .connection import SymNetConnection, SymNetConnectionType
@@ -14,9 +14,12 @@ from .converters import (
     button_converter,
     inverted_button_converter,
 )
+from .exceptions import SymNetException
 
 T = typing.TypeVar("T")
 TDSPControl = typing.TypeVar("TDSPControl", bound="DSPControl")
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DSPControl(typing.Generic[T]):
@@ -28,6 +31,7 @@ class DSPControl(typing.Generic[T]):
     _name: str
     _rcn: int
     _curr_value: T | None
+    _last_set_failed: bool
 
     _subscribers: set[typing.Callable[[TDSPControl, T, T], None]]
 
@@ -47,13 +51,14 @@ class DSPControl(typing.Generic[T]):
         self._subscribers = set()
 
         self._curr_value = None
+        self._last_set_failed = False
 
         asyncio.ensure_future(self._async_init())
 
     async def _async_init(self):
         await asyncio.gather(
             self._connection.subscribe(self._rcn, self._rcn_updated),
-            self.refresh(),
+            self.get_value(),
         )
 
     def _from_rcn(self, val: int) -> None:
@@ -103,11 +108,48 @@ class DSPControl(typing.Generic[T]):
             self._connection.unsubscribe(self._rcn, self._rcn_updated)
         )
 
-    async def refresh(self) -> None:
-        """Force update the cached value."""
+    async def get_value(self) -> T:
+        """Get the current value."""
         val = await self._connection.get_param(self._rcn)
 
         self._rcn_updated(self._rcn, val)
+
+        return self.value
+
+    async def set_value(self, val: T, force: bool = False) -> None:
+        """Set the value."""
+        old_value = self._curr_value
+
+        if not force and not self._last_set_failed and val == old_value:
+            return
+
+        self._curr_value = val
+
+        try:
+            await self._connection.set_param(self._rcn, self._to_rcn())
+        except Exception as err:
+            try:
+                # Try to determine if the call actually succeeded.
+                curr_value = await self.get_value()
+
+                if val == curr_value:
+                    self._last_set_failed = False
+
+                    return
+            except SymNetException:
+                self._curr_value = old_value
+                self._last_set_failed = True
+
+                LOGGER.warning(
+                    (
+                        f"Failed to verify that {self.name} was set. Restoring"
+                        f" previous value {old_value} for future checks."
+                    )
+                )
+
+            raise err
+
+        self._last_set_failed = False
 
     @property
     def value(self) -> T:
@@ -117,19 +159,7 @@ class DSPControl(typing.Generic[T]):
     @value.setter
     def value(self, val: T) -> None:
         """Set the value."""
-        old_value = self._curr_value
-
-        self._curr_value = val
-
-        try:
-            asyncio.ensure_future(
-                self._connection.set_param(self._rcn, self._to_rcn())
-            )
-        except Exception as err:
-            # Restore value as the DSP didn't acknowledge the change.
-            self._curr_value = old_value
-
-            raise err
+        asyncio.ensure_future(self.set_value(val))
 
     @property
     def control_number(self) -> int:
