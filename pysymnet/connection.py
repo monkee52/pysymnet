@@ -1,6 +1,7 @@
 """SymNet connection and related."""
 
 import asyncio
+import collections.abc
 import enum
 import itertools
 import logging
@@ -8,7 +9,7 @@ import typing
 
 from pysymnet.exceptions import SymNetException
 
-from .const import DEFAULT_PORT
+from .const import DEFAULT_PORT, DEFAULT_TIMEOUT
 from .protocol import SymNetProtocol
 from .tasks import (
     SymNetBasicTask,
@@ -43,11 +44,13 @@ class SymNetConnection:
     _host: str
     _port: int
     _mode: SymNetConnectionType
+    _timeout: int
 
     _version: typing.List[str]
 
     _subscriptions: dict[int, set[typing.Callable[[int, int], None]]]
 
+    _protocol_lock: asyncio.Lock
     _protocol: SymNetProtocol | None
     _next_connect_tasks: typing.List[typing.Tuple[str, SymNetTask]]
 
@@ -56,65 +59,77 @@ class SymNetConnection:
         host: str,
         port: int = DEFAULT_PORT,
         mode: SymNetConnectionType = SymNetConnectionType.TCP,
+        timeout: int = DEFAULT_TIMEOUT,
     ):
         """Initialize the DSP connection."""
         self._host = host
         self._port = port
         self._mode = mode
+        self._timeout = timeout
 
         self._subscriptions = {}
 
         self._version = None
+        self._protocol_lock = asyncio.Lock()
         self._protocol = None
         self._next_connect_tasks = []
 
     async def _get_connection(self) -> SymNetProtocol:
-        if self._protocol is not None:
-            return self._protocol
+        async with self._protocol_lock:
+            if self._protocol is not None:
+                return self._protocol
 
-        loop = asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
 
-        on_conn_made = loop.create_future()
-        on_conn_lost = loop.create_future()
+            on_conn_made = loop.create_future()
+            on_conn_lost = loop.create_future()
 
-        on_conn_lost.add_done_callback(self._conn_lost)
+            on_conn_lost.add_done_callback(self._conn_lost)
 
-        LOGGER.debug(f"Connection type is '{self._mode}'")
+            LOGGER.debug(f"Connection type is '{self._mode}'")
 
-        match self._mode:
-            case SymNetConnectionType.TCP:
-                _, protocol = await loop.create_connection(
-                    lambda: SymNetProtocol(False, on_conn_made, on_conn_lost),
-                    self._host,
-                    self._port,
-                )
-            case SymNetConnectionType.UDP:
-                _, protocol = await loop.create_datagram_endpoint(
-                    lambda: SymNetProtocol(True, on_conn_made, on_conn_lost),
-                    remote_addr=(self._host, self._port),
-                )
-            case _:
-                raise NotImplementedError(
-                    f"'{self._mode}' is not a valid connection type."
-                )
+            match self._mode:
+                case SymNetConnectionType.TCP:
+                    connect_task = loop.create_connection(
+                        lambda: SymNetProtocol(
+                            False, on_conn_made, on_conn_lost
+                        ),
+                        host=self._host,
+                        port=self._port,
+                    )
 
-        protocol.update_callback = self._update_callback
+                    _, protocol = await asyncio.wait_for(
+                        connect_task, self._timeout
+                    )
+                case SymNetConnectionType.UDP:
+                    _, protocol = await loop.create_datagram_endpoint(
+                        lambda: SymNetProtocol(
+                            True, on_conn_made, on_conn_lost
+                        ),
+                        remote_addr=(self._host, self._port),
+                    )
+                case _:
+                    raise NotImplementedError(
+                        f"'{self._mode}' is not a valid connection type."
+                    )
 
-        LOGGER.debug("Connecting...")
+            protocol.update_callback = self._update_callback
 
-        await on_conn_made
+            LOGGER.debug("Connecting...")
 
-        LOGGER.debug("Connected.")
-        LOGGER.debug(f"Re-queuing {len(self._next_connect_tasks)} tasks.")
+            await on_conn_made
 
-        for msg, task in self._next_connect_tasks:
-            protocol.queue_task(msg, task)
+            LOGGER.debug("Connected.")
+            LOGGER.debug(f"Re-queuing {len(self._next_connect_tasks)} tasks.")
 
-        self._next_connect_tasks = []
+            for msg, task in self._next_connect_tasks:
+                protocol.queue_task(msg, task)
 
-        self._protocol = protocol
+            self._next_connect_tasks = []
 
-        return protocol
+            self._protocol = protocol
+
+            return protocol
 
     def _conn_lost(self, fut: asyncio.Future[Exception | None]) -> None:
         if self._protocol is not None:
@@ -151,7 +166,10 @@ class SymNetConnection:
                 else:
                     conn.queue_task_immediate(msg, task)
 
-                return await task
+                return await asyncio.wait_for(task, self._timeout)
+            except asyncio.CancelledError:
+                # The task was cancelled, because it timed out.
+                last_err = TimeoutError()
             except Exception as err:
                 last_err = err
 
@@ -249,51 +267,77 @@ class SymNetConnection:
         await self._do_task("NOP", SymNetBasicTask())
 
     async def subscribe(
-        self, param: int | None, callback: typing.Callable[[int, int], None]
+        self,
+        params: int | collections.abc.Iterable[int] | None,
+        callback: typing.Callable[[int, int], None],
     ) -> None:
         """Subscribe to value changes for a parameter."""
-        check_rcn(param)
+        try:
+            params = iter(params)
+        except TypeError:
+            params = [params]
 
-        if param is None:
-            param = -1
+        for param in params:
+            check_rcn(param)
 
-        if param not in self._subscriptions:
-            self._subscriptions[param] = {callback}
+            if param is None:
+                param = -1
 
-            await self._update_subscriptions()
-        else:
-            self._subscriptions[param].add(callback)
+            if param not in self._subscriptions:
+                self._subscriptions[param] = {callback}
+            else:
+                self._subscriptions[param].add(callback)
+
+        await self._update_subscriptions()
 
     async def unsubscribe(
-        self, param: int | None, callback: typing.Callable[[int, int], None]
+        self,
+        params: int | collections.abc.Iterable[int] | None,
+        callback: typing.Callable[[int, int], None],
     ) -> None:
         """Unsubscribe from value changes for a parameter."""
-        check_rcn(param)
+        try:
+            params = iter(params)
+        except TypeError:
+            params = [params]
 
-        if param is None:
-            param = -1
+        remove_subs = []
 
-        if param in self._subscriptions:
-            subs = self._subscriptions[param]
+        for param in params:
+            check_rcn(param)
 
-            subs.discard(callback)
+            if param is None:
+                param = -1
 
-            if len(subs) == 0:
-                del self._subscriptions[param]
+            if param in self._subscriptions:
+                subs = self._subscriptions[param]
 
-                await self._update_subscriptions(param)
+                subs.discard(callback)
+
+                if len(subs) == 0:
+                    del self._subscriptions[param]
+
+                    remove_subs.append(param)
+
+        await self._update_subscriptions(remove_subs)
 
     async def _update_subscriptions(
-        self, deleted_param: int | None = None
+        self, deleted_params: int | collections.abc.Iterable[int] | None = None
     ) -> None:
         subscribe_tasks = []
 
-        if deleted_param is not None:
-            subscribe_tasks.append(
-                self._do_task(
-                    f"PUD {deleted_param}", SymNetBasicTask(retry_limit=3)
+        if deleted_params is not None:
+            try:
+                deleted_params = iter(deleted_params)
+            except TypeError:
+                deleted_params = [deleted_params]
+
+            for deleted_param in deleted_params:
+                subscribe_tasks.append(
+                    self._do_task(
+                        f"PUD {deleted_param}", SymNetBasicTask(retry_limit=3)
+                    )
                 )
-            )
 
         # convert to ranges - https://stackoverflow.com/a/4629241
         params = sorted(param for param in self._subscriptions)
@@ -326,8 +370,9 @@ class SymNetConnection:
     def _get_subscribers(
         self, param: int
     ) -> typing.Generator[typing.Callable[[int, int], None], None, None]:
-        for callback in self._subscriptions[-1]:
-            yield callback
+        if -1 in self._subscriptions:
+            for callback in self._subscriptions[-1]:
+                yield callback
 
         for callback in self._subscriptions[param]:
             yield callback

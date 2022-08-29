@@ -91,10 +91,13 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
             msg, task = self._queue.popleft()
 
+            while task.cancelled():
+                msg, task = self._queue.popleft()
+
             self._current_msg = msg
             self._current_task = task
 
-            task._future.add_done_callback(self._task_done)
+            task.add_done_callback(self._task_done)
 
             LOGGER.debug(f"Sending '{msg}'.")
 
@@ -107,7 +110,7 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
             result = fut.result()
 
             LOGGER.debug(f"Task completed with result {result}")
-        except Exception as err:
+        except (Exception, asyncio.CancelledError) as err:
             LOGGER.debug(f"Task completed with exception {err}")
 
         self._current_task = None
@@ -134,10 +137,7 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
         """Get all tasks in the queue."""
         tasks = list(self._queue)
 
-        if (
-            self._current_task is not None
-            and not self._current_task._future.done()
-        ):
+        if self._current_task is not None and not self._current_task.done():
             tasks = [(self._current_msg, self._current_task)] + tasks
 
             self._current_msg = None
@@ -147,8 +147,6 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
     def data_received(self, data: bytes) -> None:
         """Notify that TCP data has been received."""
-        [print(line) for line in data.decode().split("\r")]
-
         for line in data.split(b"\r")[:-1]:
             self._process_line(line.decode())
 

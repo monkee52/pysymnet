@@ -6,7 +6,7 @@ import typing
 from xml.dom.minidom import Attr
 
 from .connection import SymNetConnection, SymNetConnectionType
-from .const import DEFAULT_PORT
+from .const import DEFAULT_PORT, DEFAULT_TIMEOUT
 from .converters import (
     DecibelConverter,
     PercentConverter,
@@ -40,6 +40,9 @@ class DSPControl(typing.Generic[T]):
 
     _subscribers: set[typing.Callable[[TDSPControl, T, T], None]]
 
+    _init_lock: asyncio.Lock
+    _initialized: bool
+
     def __init__(
         self,
         connection: SymNetConnection,
@@ -58,13 +61,23 @@ class DSPControl(typing.Generic[T]):
         self._curr_value = None
         self._last_set_failed = False
 
-        asyncio.ensure_future(self._async_init())
+        self._init_lock = asyncio.Lock()
+        self._initialized = False
 
-    async def _async_init(self):
-        await asyncio.gather(
-            self._connection.subscribe(self._rcn, self._rcn_updated),
-            self.get_value(),
-        )
+        asyncio.ensure_future(self.async_init())
+
+    async def async_init(self):
+        """Initialize subscriptions for the control."""
+        async with self._init_lock:
+            if self._initialized:
+                return
+
+            await asyncio.gather(
+                self._connection.subscribe(self._rcn, self._rcn_updated),
+                self.get_value(),
+            )
+
+            self._initialized = True
 
     def _from_rcn(self, val: int) -> None:
         if self._converter is not None:
@@ -87,7 +100,7 @@ class DSPControl(typing.Generic[T]):
         self._from_rcn(val)
 
         for callback in self._subscribers:
-            callback(self, old_value, self._curr_value)
+            callback(self, self._curr_value, old_value)
 
     def subscribe(
         self, callback: typing.Callable[[TDSPControl, T, T], None]
@@ -101,17 +114,21 @@ class DSPControl(typing.Generic[T]):
         """Deregister for update notifications."""
         self._subscribers.discard(callback)
 
-    def destroy(self) -> None:
+    async def destroy(self) -> None:
         """Destroy the control.
 
         Removes all update subscribers and notifies the control that
         we're no longer interested in it's updates.
         """
-        self._subscribers.clear()
+        async with self._init_lock:
+            if not self._initialized:
+                return
 
-        asyncio.ensure_future(
-            self._connection.unsubscribe(self._rcn, self._rcn_updated)
-        )
+            self._subscribers.clear()
+
+            await self._connection.unsubscribe(self._rcn, self._rcn_updated)
+
+            self._initialized = False
 
     async def get_value(self) -> T:
         """Get the current value."""
@@ -183,6 +200,7 @@ class DSP:
     _host: str
     _port: int
     _mode: SymNetConnectionType
+    _timeout: int
 
     _connection: SymNetConnection
 
@@ -194,18 +212,20 @@ class DSP:
         host: str,
         port: int = DEFAULT_PORT,
         mode: SymNetConnectionType = SymNetConnectionType.TCP,
+        timeout: int = DEFAULT_TIMEOUT,
     ):
         """Initialize DSP host."""
         self._host = host
         self._port = port
         self._mode = mode
+        self._timeout = timeout
 
         self._controls = {}
         self._subscriptions = set()
 
-        self._connection = SymNetConnection(host, port, mode)
+        self._connection = SymNetConnection(host, port, mode, timeout)
 
-    def add_control(
+    async def add_control(
         self, name: str, rcn: int, converter: SymNetConverter[T] | None = None
     ) -> DSPControl:
         """Add a control property for the DSP."""
@@ -214,18 +234,22 @@ class DSP:
 
         control = DSPControl(self._connection, name, rcn, converter)
 
+        await control.async_init()
+
         self._controls[name] = control
 
         control.subscribe(self._control_updated)
 
         return control
 
-    def remove_control(self, nameOrControl: str | DSPControl) -> None:
+    async def remove_control(self, nameOrControl: str | DSPControl) -> None:
         """Remove a control property for the DSP."""
         # Ensure it's a control
         nameOrControl = self.get_control(nameOrControl)
 
         nameOrControl.unsubscribe(self._control_updated)
+
+        await nameOrControl.destroy()
 
         # Change back to name
         nameOrControl = nameOrControl.name
@@ -259,7 +283,7 @@ class DSP:
     def __delattr__(self, name: str) -> None:
         """Delete a DSP control, or pass up the chain."""
         if name in self._controls:
-            self._controls[name].destroy()
+            asyncio.ensure_future(self._controls[name].destroy())
 
             del self._controls[name]
         else:
@@ -278,7 +302,9 @@ class DSP:
         """Connect to the DSP."""
         await self._connection.connect()
 
-    def _control_updated(self, control: DSPControl[T], val: T) -> None:
+    def _control_updated(
+        self, control: DSPControl[T], val: T, old_val: T
+    ) -> None:
         for callback in self._subscriptions:
             callback(control, val)
 

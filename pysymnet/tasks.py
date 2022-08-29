@@ -9,34 +9,22 @@ from .exceptions import SymNetException
 T = typing.TypeVar("T")
 
 
-class SymNetTask(typing.Generic[T], metaclass=abc.ABCMeta):
+class SymNetTask(typing.Generic[T], asyncio.Future[T], metaclass=abc.ABCMeta):
     """Base SymNet task."""
 
     expects_update_format: bool = False
     _retry_limit: int = 1
 
-    _future: asyncio.Future[T]
-
     def __init__(self, retry_limit: int = 1):
         """Initialize task."""
-        loop = asyncio.get_running_loop()
-
-        self._future = loop.create_future()
+        super().__init__()
 
         self._retry_limit = retry_limit
-
-    def __await__(self) -> typing.Generator[typing.Any, None, T]:
-        """Allow task to be awaited."""
-        return self._future.__await__()
 
     @abc.abstractmethod
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
         raise NotImplementedError()
-
-    def error(self, err: Exception) -> None:
-        """Raise an exception."""
-        self._future.set_exception(err)
 
     @property
     def retry_limit(self) -> int:
@@ -54,7 +42,7 @@ class SymNetBasicTask(SymNetTask[bool]):
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
         if line.upper() == "ACK":
-            self._future.set_result(True)
+            self.set_result(True)
         else:
             self.error(SymNetException(f"Unexpected value: '{line}'"))
 
@@ -68,7 +56,7 @@ class SymNetStringTask(SymNetTask[str]):
 
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
-        self._future.set_result(line)
+        self.set_result(line)
 
 
 class SymNetMultiStringTask(SymNetTask[typing.List[str]]):
@@ -85,7 +73,7 @@ class SymNetMultiStringTask(SymNetTask[typing.List[str]]):
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
         if line == ">":
-            self._future.set_result(self._strs)
+            self.set_result(self._strs)
         else:
             self._strs.append(line)
 
@@ -102,7 +90,7 @@ class SymNetValueTask(SymNetTask[int]):
         try:
             val: int = int(line)
 
-            self._future.set_result(val)
+            self.set_result(val)
         except Exception as err:
             self.error(err)
 
@@ -145,6 +133,6 @@ class SymNetMultiValueTask(SymNetTask[dict[int, int]]):
             self._values[control] = val
 
             if self._line_counter == self.control_count:
-                self._future.set_result(self._values)
+                self.set_result(self._values)
         except Exception as err:
             self.error(err)

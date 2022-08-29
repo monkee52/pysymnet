@@ -12,7 +12,14 @@ def create_dummy_dsp():
 
     bind = server.getsockname()
 
-    print(f"Listening on {bind[0]}:{bind[1]}")
+    server2 = socket.socket(
+        socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
+    )
+
+    server2.bind(("", 48631))
+    server2_clients = set()
+
+    print(f"Listening on {bind[0]}:{bind[1]} (TCP/UDP)")
 
     clients = {}
     params = {}
@@ -20,10 +27,21 @@ def create_dummy_dsp():
     try:
         while True:
             rc, _, _ = select.select(
-                [server] + [client for client in clients], [], []
+                [server, server2] + [client for client in clients], [], []
             )
 
             for sock in rc:
+                is_udp = False
+                addr = None
+
+                def send(data: bytes) -> None:
+                    nonlocal is_udp, addr
+
+                    if is_udp:
+                        server2.sendto(data, addr)
+                    else:
+                        sock.send(data)
+
                 if sock == server:
                     client, addr = server.accept()
 
@@ -31,12 +49,28 @@ def create_dummy_dsp():
 
                     clients[client] = addr
                 else:
-                    lines = sock.recv(4096)
+                    lines = None
+
+                    if sock == server2:
+                        is_udp = True
+
+                        lines, addr = server2.recvfrom(4096)
+
+                        client = socket.socket(
+                            socket.AF_INET,
+                            socket.SOCK_DGRAM,
+                            socket.IPPROTO_UDP
+                        )
+
+                        server2_clients.add(addr)
+                    else:
+                        lines = sock.recv(4096)
 
                     print(lines.decode())
 
                     if lines == b"":
-                        del clients[sock]
+                        if not is_udp:
+                            del clients[sock]
 
                         continue
 
@@ -48,7 +82,7 @@ def create_dummy_dsp():
                         if line.upper() == "$V V":
                             print("get version")
 
-                            sock.send("Dummy DSP\r>\r".encode())
+                            send("Dummy DSP\r>\r".encode())
                             continue
                         else:
                             line = line.split(" ")
@@ -62,7 +96,7 @@ def create_dummy_dsp():
 
                                 print(f"get {rcn} = {val}")
 
-                                sock.send(f"{val}\r".encode())
+                                send(f"{val}\r".encode())
                             case "CS":
                                 rcn = int(line[1])
                                 val = int(line[2])
@@ -73,8 +107,11 @@ def create_dummy_dsp():
 
                                 for client in clients:
                                     client.send(f"#{rcn}={val}\r".encode())
+                                
+                                for addr2 in server2_clients:
+                                    server2.sendto(f"#{rcn}={val}\r".encode(), addr2)
 
-                                sock.send(b"ACK\r")
+                                send(b"ACK\r")
                             case "CSQ":
                                 rcn = int(line[1])
                                 val = int(line[2])
@@ -85,18 +122,22 @@ def create_dummy_dsp():
 
                                 for client in clients:
                                     client.send(f"#{rcn}={val}\r".encode())
+                                
+                                for addr2 in server2_clients:
+                                    server2.sendto(f"#{rcn}={val}\r".encode(), addr2)
 
-                                sock.send(b"ACK\r")
+                                send(b"ACK\r")
                             case "RI":
                                 ip = server.getsockname()[0]
 
                                 print(f"ip = {ip}")
 
-                                sock.send(f"{ip}\r".encode())
+                                send(f"{ip}\r".encode())
                             case _:
-                                sock.send(f"ACK\r".encode())
+                                send(f"ACK\r".encode())
     except KeyboardInterrupt:
         server.close()
+        server2.close()
 
 
 if __name__ == "__main__":
