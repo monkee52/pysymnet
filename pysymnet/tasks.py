@@ -13,46 +13,38 @@ class SymNetTask(typing.Generic[T], asyncio.Future[T], metaclass=abc.ABCMeta):
     """Base SymNet task."""
 
     expects_update_format: bool = False
-    _retry_limit: int = 1
 
-    def __init__(self, retry_limit: int = 1):
+    def __init__(self):
         """Initialize task."""
         super().__init__()
-
-        self._retry_limit = retry_limit
 
     @abc.abstractmethod
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
         raise NotImplementedError()
 
-    @property
-    def retry_limit(self) -> int:
-        """Get the retry limit."""
-        return self._retry_limit
-
 
 class SymNetBasicTask(SymNetTask[bool]):
     """SymNet task that returns ACK/NAK."""
 
-    def __init__(self, retry_limit: int = 1):
+    def __init__(self):
         """Initialize task."""
-        super().__init__(retry_limit)
+        super().__init__()
 
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
         if line.upper() == "ACK":
             self.set_result(True)
         else:
-            self.error(SymNetException(f"Unexpected value: '{line}'"))
+            self.set_exception(SymNetException(f"Unexpected value: '{line}'"))
 
 
 class SymNetStringTask(SymNetTask[str]):
     """SymNet task that returns a single string."""
 
-    def __init__(self, retry_limit: int = 1):
+    def __init__(self):
         """Initialize task."""
-        super().__init__(retry_limit)
+        super().__init__()
 
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
@@ -64,9 +56,9 @@ class SymNetMultiStringTask(SymNetTask[typing.List[str]]):
 
     _strs: typing.List[str]
 
-    def __init__(self, retry_limit: int = 1):
+    def __init__(self):
         """Initialize task."""
-        super().__init__(retry_limit)
+        super().__init__()
 
         self._strs = []
 
@@ -81,9 +73,9 @@ class SymNetMultiStringTask(SymNetTask[typing.List[str]]):
 class SymNetValueTask(SymNetTask[int]):
     """SymNet task that returns an integer."""
 
-    def __init__(self, retry_limit: int = 1):
+    def __init__(self):
         """Initialize task."""
-        super().__init__(retry_limit)
+        super().__init__()
 
     def handle_line(self, line: str) -> None:
         """Process a line of text returned from the DSP."""
@@ -106,12 +98,11 @@ class SymNetMultiValueTask(SymNetTask[dict[int, int]]):
 
     def __init__(
         self,
-        retry_limit: int = 1,
         start_control: int = 0,
         control_count: int = 1,
     ):
         """Initialize task."""
-        super().__init__(retry_limit)
+        super().__init__()
 
         self.start_control = start_control
         self.control_count = control_count

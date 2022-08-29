@@ -1,3 +1,7 @@
+"""A very dodgy implementation of a Symetrix DSP.
+Acknowledges all unknown commands, NAK for params not set, then ACK
+for params that have been set."""
+
 import select
 import socket
 

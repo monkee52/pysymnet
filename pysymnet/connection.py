@@ -151,12 +151,19 @@ class SymNetConnection:
 
         await self._protocol.disconnect()
 
-    async def _do_task(self, msg: str, task: SymNetTask[T]) -> T:
+    async def _do_task(
+        self,
+        msg: str,
+        task_factory: typing.Callable[[], SymNetTask[T]],
+        retry_limit: int = 1,
+    ) -> T:
         ctr: int = 0
         last_err: Exception | None = None
 
-        while ctr < task.retry_limit:
-            LOGGER.debug(f"'{msg}' attempt {ctr + 1} of {task.retry_limit}")
+        while ctr < retry_limit:
+            LOGGER.debug(f"'{msg}' attempt {ctr + 1} of {retry_limit}")
+
+            task = task_factory()
 
             try:
                 conn = await self._get_connection()
@@ -181,41 +188,49 @@ class SymNetConnection:
     async def get_param(self, param: int) -> int:
         """Get value for DSP parameter."""
         return await self._do_task(
-            f"GS {param}", SymNetValueTask(retry_limit=3)
+            f"GS {param}", lambda: SymNetValueTask(), retry_limit=3
         )
 
     async def set_param(self, param: int, value: int) -> None:
         """Set DSP parameter."""
-        await self._do_task(f"CSQ {param} {value}", SymNetBasicTask())
+        await self._do_task(f"CSQ {param} {value}", lambda: SymNetBasicTask())
 
     async def set_param_checked(self, param: int, value: int) -> None:
         """Set DSP parameter and ensure it exists."""
-        await self._do_task(f"CS {param} {value}", SymNetBasicTask())
+        await self._do_task(f"CS {param} {value}", lambda: SymNetBasicTask())
 
     async def change_param(self, param: int, amount: int) -> None:
         """Change DSP parameter by relative value."""
         dir = 1 if amount >= 0 else 0
         amount = abs(amount)
 
-        await self._do_task(f"CC {param} {dir} {amount}", SymNetBasicTask())
+        await self._do_task(
+            f"CC {param} {dir} {amount}", lambda: SymNetBasicTask()
+        )
 
     async def get_param_block(self, start: int, count: int) -> dict[int, int]:
         """Get multiple DSP parameters."""
         return await self._do_task(
-            f"GDB {start} {count}", SymNetMultiValueTask(retry_limit=3)
+            f"GDB {start} {count}",
+            lambda: SymNetMultiValueTask(),
+            retry_limit=3,
         )
 
     async def get_preset(self) -> int:
         """Get the most recently loaded preset."""
-        return await self._do_task("GPR", SymNetValueTask(retry_limit=3))
+        return await self._do_task(
+            "GPR", lambda: SymNetValueTask(), retry_limit=3
+        )
 
     async def load_preset(self, preset: int) -> None:
         """Load a preset."""
-        await self._do_task(f"LP {preset}", SymNetBasicTask())
+        await self._do_task(f"LP {preset}", lambda: SymNetBasicTask())
 
     async def flash(self, count: int = 8) -> None:
         """Flash the lights on the DSP to identify it."""
-        await self._do_task(f"FU {count}", SymNetBasicTask(retry_limit=3))
+        await self._do_task(
+            f"FU {count}", lambda: SymNetBasicTask(), retry_limit=3
+        )
 
     async def set_system_string(
         self,
@@ -229,7 +244,7 @@ class SymNetConnection:
         """Set a system string on the DSP."""
         await self._do_task(
             f"SSYSS {unit}.{resource}.{enum}.{card}.{channel}={value}",
-            SymNetBasicTask(),
+            lambda: SymNetBasicTask(),
         )
 
     async def get_system_string(
@@ -238,12 +253,15 @@ class SymNetConnection:
         """Get a system string from the DSP."""
         return await self._do_task(
             f"GSYSS {unit}.{resource}.{enum}.{card}.{channel}",
-            SymNetStringTask(retry_limit=3),
+            lambda: SymNetStringTask(),
+            retry_limit=3,
         )
 
     async def get_ip(self) -> tuple[str, str]:
         """Get the connect IP and the self-reported DSP IP."""
-        ip = await self._do_task("RI", SymNetStringTask(retry_limit=3))
+        ip = await self._do_task(
+            "RI", lambda: SymNetStringTask(), retry_limit=3
+        )
 
         return (self._host, ip)
 
@@ -251,7 +269,7 @@ class SymNetConnection:
         """Get the version information from the DSP."""
         if self._version is None:
             self._version = await self._do_task(
-                "$v V", SymNetMultiStringTask(retry_limit=3)
+                "$v V", lambda: SymNetMultiStringTask(), retry_limit=3
             )
         else:
             LOGGER.debug("Using cached version information.")
@@ -260,11 +278,11 @@ class SymNetConnection:
 
     async def reboot(self) -> None:
         """Reboot the DSP."""
-        await self._do_task("R!", SymNetBasicTask())
+        await self._do_task("R!", lambda: SymNetBasicTask())
 
     async def ping(self) -> None:
         """Ping the DSP."""
-        await self._do_task("NOP", SymNetBasicTask())
+        await self._do_task("NOP", lambda: SymNetBasicTask())
 
     async def subscribe(
         self,
@@ -335,7 +353,9 @@ class SymNetConnection:
             for deleted_param in deleted_params:
                 subscribe_tasks.append(
                     self._do_task(
-                        f"PUD {deleted_param}", SymNetBasicTask(retry_limit=3)
+                        f"PUD {deleted_param}",
+                        lambda: SymNetBasicTask(),
+                        retry_limit=3,
                     )
                 )
 
@@ -361,7 +381,9 @@ class SymNetConnection:
 
             subscribe_tasks.append(
                 self._do_task(
-                    f"PUE {range_str}", SymNetBasicTask(retry_limit=3)
+                    f"PUE {range_str}",
+                    lambda: SymNetBasicTask(),
+                    retry_limit=3,
                 )
             )
 

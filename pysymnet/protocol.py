@@ -59,6 +59,9 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
     def _process_line(self, line: str) -> None:
         LOGGER.debug(f"Processing line '{line}'")
 
+        if line == "":
+            return
+
         task = self._current_task
 
         if (task is None or not task.expects_update_format) and line[0] == "#":
@@ -75,7 +78,7 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
                 self.update_callback(rcn, val)
         elif task is not None:
             if line.upper() == "NAK":
-                task.error(SymNetException("NAK received from DSP."))
+                task.set_exception(SymNetException("NAK received from DSP."))
             else:
                 task.handle_line(line)
         else:
@@ -147,8 +150,8 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
 
     def data_received(self, data: bytes) -> None:
         """Notify that TCP data has been received."""
-        for line in data.split(b"\r")[:-1]:
-            self._process_line(line.decode())
+        for line in data.decode().splitlines():
+            self._process_line(line.strip())
 
     def datagram_received(
         self, data: bytes, addr: typing.Tuple[str, int]
