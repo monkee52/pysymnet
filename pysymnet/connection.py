@@ -6,6 +6,8 @@ import itertools
 import logging
 import typing
 
+from pysymnet.exceptions import SymNetException
+
 from .const import DEFAULT_PORT
 from .protocol import SymNetProtocol
 from .tasks import (
@@ -27,6 +29,12 @@ class SymNetConnectionType(enum.Enum):
 
     TCP = "tcp"
     UDP = "udp"
+
+
+def check_rcn(param: int):
+    """Raise an exception if the RCN is not valid."""
+    if param < 1 or param > 10_000:
+        raise SymNetException("RCN must be between 0 and 10,000.")
 
 
 class SymNetConnection:
@@ -241,9 +249,14 @@ class SymNetConnection:
         await self._do_task("NOP", SymNetBasicTask())
 
     async def subscribe(
-        self, param: int, callback: typing.Callable[[int, int], None]
+        self, param: int | None, callback: typing.Callable[[int, int], None]
     ) -> None:
         """Subscribe to value changes for a parameter."""
+        check_rcn(param)
+
+        if param is None:
+            param = -1
+
         if param not in self._subscriptions:
             self._subscriptions[param] = {callback}
 
@@ -252,9 +265,14 @@ class SymNetConnection:
             self._subscriptions[param].add(callback)
 
     async def unsubscribe(
-        self, param: int, callback: typing.Callable[[int, int], None]
+        self, param: int | None, callback: typing.Callable[[int, int], None]
     ) -> None:
         """Unsubscribe from value changes for a parameter."""
+        check_rcn(param)
+
+        if param is None:
+            param = -1
+
         if param in self._subscriptions:
             subs = self._subscriptions[param]
 
@@ -305,10 +323,19 @@ class SymNetConnection:
 
         await asyncio.gather(*subscribe_tasks)
 
+    def _get_subscribers(
+        self, param: int
+    ) -> typing.Generator[typing.Callable[[int, int], None], None, None]:
+        for callback in self._subscriptions[-1]:
+            yield callback
+
+        for callback in self._subscriptions[param]:
+            yield callback
+
     def publish(self, param: int, value: int) -> None:
         """Trigger all callbacks that a parameter has changed."""
         if param in self._subscriptions:
-            for callback in self._subscriptions[param]:
+            for callback in self._get_subscribers(param):
                 try:
                     callback(param, value)
                 except Exception as err:

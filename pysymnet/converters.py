@@ -133,4 +133,7 @@ class SelectorConverter(SymNetConverter[int]):
 button_converter = ButtonConverter()
 inverted_button_converter = ButtonConverter(inverted=True)
 
-default_decibel_converter = DecibelConverter()
+gain_converter = DecibelConverter()
+gain_pc_converter = PercentConverter()
+trim_converter = DecibelConverter(-24.0, +24.0)
+trim_pc_converter = PercentConverter(-24.0, +24.0)

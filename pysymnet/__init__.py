@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import typing
+from xml.dom.minidom import Attr
 
 from .connection import SymNetConnection, SymNetConnectionType
 from .const import DEFAULT_PORT
@@ -12,7 +13,11 @@ from .converters import (
     SelectorConverter,
     SymNetConverter,
     button_converter,
+    gain_converter,
+    gain_pc_converter,
     inverted_button_converter,
+    trim_converter,
+    trim_pc_converter,
 )
 from .exceptions import SymNetException
 
@@ -181,7 +186,8 @@ class DSP:
 
     _connection: SymNetConnection
 
-    _controls: dict[str, DSPControl] = {}
+    _controls: dict[str, DSPControl]
+    _subscriptions: set[DSPControl]
 
     def __init__(
         self,
@@ -195,6 +201,7 @@ class DSP:
         self._mode = mode
 
         self._controls = {}
+        self._subscriptions = set()
 
         self._connection = SymNetConnection(host, port, mode)
 
@@ -209,12 +216,19 @@ class DSP:
 
         self._controls[name] = control
 
+        control.subscribe(self._control_updated)
+
         return control
 
     def remove_control(self, nameOrControl: str | DSPControl) -> None:
         """Remove a control property for the DSP."""
-        if isinstance(nameOrControl, DSPControl):
-            nameOrControl = nameOrControl.name
+        # Ensure it's a control
+        nameOrControl = self.get_control(nameOrControl)
+
+        nameOrControl.unsubscribe(self._control_updated)
+
+        # Change back to name
+        nameOrControl = nameOrControl.name
 
         delattr(self, nameOrControl)
 
@@ -227,17 +241,17 @@ class DSP:
 
     def __getattr__(self, name: str) -> typing.Any:
         """Get DSP control value, or pass up the chain."""
-        if name in self._controls:
-            return self._controls[name].value
-
-        if name in self.__dict__:
-            return self.__dict__[name]
-
-        raise AttributeError(name)
+        if "_controls" in self.__dict__ and name in self.__dict__["_controls"]:
+            return self.__dict__["_controls"]
 
     def __setattr__(self, name: str, value: T) -> None:
         """Set a DSP control value, or pass up the chain."""
-        if name in self._controls:
+        if name == "_controls":
+            self.__dict__[name] = value
+
+            return
+
+        if "_controls" in self.__dict__ and name in self.__dict__["_controls"]:
             self._controls[name].value = value
         else:
             self.__dict__[name] = value
@@ -251,20 +265,47 @@ class DSP:
         else:
             del self.__dict__[name]
 
+    async def refresh_all(self) -> None:
+        """Refresh all DSP controls."""
+        await asyncio.gather(
+            *[
+                self._controls[control].get_value()
+                for control in self._controls
+            ]
+        )
+
     async def connect(self) -> None:
         """Connect to the DSP."""
         await self._connection.connect()
 
+    def _control_updated(self, control: DSPControl[T], val: T) -> None:
+        for callback in self._subscriptions:
+            callback(control, val)
+
     def subscribe(
-        self, name: str, callback: typing.Callable[[DSPControl[T], T, T], None]
+        self,
+        name: str | None,
+        callback: typing.Callable[[DSPControl[T], T, T], None],
     ) -> None:
         """Subscribe to a control update."""
+        if name is None:
+            self._subscriptions.add(callback)
+
+            return
+
         self._controls[name].subscribe(callback)
 
     def unsubscribe(
-        self, name: str, callback: typing.Callable[[DSPControl[T], T, T], None]
+        self,
+        name: str | None,
+        callback: typing.Callable[[DSPControl[T], T, T], None],
     ) -> None:
         """Unsubscribe to a control update."""
+        if name is None:
+            self._subscriptions.discard(callback)
+
+            return
+
         self._controls[name].unsubscribe(callback)
 
     @property
