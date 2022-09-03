@@ -168,6 +168,7 @@ class SymNetConnection:
             try:
                 conn = await self._get_connection()
 
+                # Check if retry, if so, jump to front of queue
                 if ctr == 0:
                     conn.queue_task(msg, task)
                 else:

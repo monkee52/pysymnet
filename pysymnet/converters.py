@@ -67,20 +67,16 @@ class DecibelConverter(SymNetConverter[float]):
         return max(0, min(65535, rcn_val))
 
 
-class PercentConverter(DecibelConverter):
+class PercentConverter(SymNetConverter[float]):
     """DSP percentage converter."""
 
     def from_rcn(self, val: int) -> float:
         """Convert a DSP value to the percentage equivalent."""
-        db = super().from_rcn(val)
-
-        return db - self.min / self._delta * 100.0
+        return val / 65535.0 * 100.0
 
     def to_rcn(self, val: float) -> int:
         """Convert a percentage value to the DSP equivalent."""
-        db = val / 100.0 * self._delta + self.min
-
-        return super().to_rcn(db)
+        return val * 65535.0 / 100.0
 
 
 class ButtonConverter(SymNetConverter[bool]):
@@ -109,31 +105,56 @@ class ButtonConverter(SymNetConverter[bool]):
 class SelectorConverter(SymNetConverter[int]):
     """DSP selector converter."""
 
+    _valid_counts: list[int] = [2, 4, 6, 8, 12, 16]
+    _options: list[str]
     _count: int
+    _real_count: int
 
-    def __init__(self, count: int):
+    def __init__(self, options: list[str], count: int | None = None):
         """Initialize enum converter."""
-        self._count = count
+        self._count = len(options)
+        self._options = options.copy()
+
+        if count is None:
+            ctr = 0
+
+            while self._count > self._valid_counts[ctr] and ctr < len(
+                self._valid_counts
+            ):
+                ctr += 1
+
+            self._real_count = self._valid_counts[ctr]
+        elif count in self._valid_counts:
+            self._real_count = count
+        else:
+            raise ValueError(
+                f"{count} is not a valid selector. Valid selectors:"
+                " 2, 4, 6, 8, 12, 16"
+            )
 
     @property
     def count(self):
         """Get the count of values for the selector."""
         return self._count
 
+    @property
+    def selector_count(self):
+        """Get the underlying selector count."""
+        return self._real_count
+
     def from_rcn(self, val: int) -> int:
         """Convert a DSP value to the selector number."""
         # TODO: RCN to selector number converter.
-        raise NotImplementedError()
+        return int(val * (self._real_count - 1) / 65535.0)
 
     def to_rcn(self, val: int) -> int:
         """Convert a selector value to the DSP equivalent."""
-        return int(float(val) * 65535.0 / float(self.count - 1))
+        return int(float(val) * 65535.0 / float(self._real_count - 1))
 
 
 button_converter = ButtonConverter()
 inverted_button_converter = ButtonConverter(inverted=True)
 
 gain_converter = DecibelConverter()
-gain_pc_converter = PercentConverter()
 trim_converter = DecibelConverter(-24.0, +24.0)
-trim_pc_converter = PercentConverter(-24.0, +24.0)
+percent_converter = PercentConverter()

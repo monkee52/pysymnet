@@ -82,7 +82,7 @@ class SymNetProtocol(asyncio.Protocol, asyncio.DatagramProtocol):
             else:
                 task.handle_line(line)
         else:
-            LOGGER.debug("Unexpected response '{line}'.")
+            LOGGER.debug("Unexpected data from DSP '{line}'.")
 
     def _try_process_tasks(self) -> None:
         if self._current_task is not None:

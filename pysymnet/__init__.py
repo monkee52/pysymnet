@@ -9,15 +9,13 @@ from .connection import SymNetConnection, SymNetConnectionType
 from .const import DEFAULT_PORT, DEFAULT_TIMEOUT
 from .converters import (
     DecibelConverter,
-    PercentConverter,
     SelectorConverter,
     SymNetConverter,
     button_converter,
     gain_converter,
-    gain_pc_converter,
     inverted_button_converter,
+    percent_converter,
     trim_converter,
-    trim_pc_converter,
 )
 from .exceptions import SymNetException
 
@@ -310,29 +308,35 @@ class DSP:
 
     def subscribe(
         self,
-        name: str | None,
+        nameOrControl: str | DSPControl[T] | None,
         callback: typing.Callable[[DSPControl[T], T, T], None],
     ) -> None:
         """Subscribe to a control update."""
-        if name is None:
+        if nameOrControl is None:
             self._subscriptions.add(callback)
 
             return
 
-        self._controls[name].subscribe(callback)
+        if not isinstance(nameOrControl, DSPControl):
+            nameOrControl = self._controls[nameOrControl]
+
+        nameOrControl.subscribe(callback)
 
     def unsubscribe(
         self,
-        name: str | None,
+        nameOrControl: str | DSPControl[T] | None,
         callback: typing.Callable[[DSPControl[T], T, T], None],
     ) -> None:
         """Unsubscribe to a control update."""
-        if name is None:
+        if nameOrControl is None:
             self._subscriptions.discard(callback)
 
             return
 
-        self._controls[name].unsubscribe(callback)
+        if not isinstance(nameOrControl, DSPControl):
+            nameOrControl = self._controls[nameOrControl]
+
+        nameOrControl.unsubscribe(callback)
 
     @property
     def connection(self) -> SymNetConnection:
